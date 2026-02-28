@@ -1,3 +1,4 @@
+library(rjags)
 library(runjags)
 library(coda)
 library(bridgesampling)
@@ -15,6 +16,7 @@ library(gridExtra)
 library(tibble)
 library(tidyr)
 library(xtable)
+library(glmmTMB)
 
 set.seed(2025)
 
@@ -196,7 +198,7 @@ OverallPlot <- OverallTop + OverallScatter + OverallRight +
   )
 
 ggsave(
-  "Manuscript/Output/DS_Scatter_Overall.pdf",
+  "Manuscript/Output/DS_Scatter_Marginal_Overall.pdf",
   OverallPlot,
   width = 5.12,
   height = 4.48,
@@ -273,12 +275,174 @@ FullFacets <- wrap_plots(PanelList, ncol = 4, nrow = 2) &
   theme(plot.margin = margin(2, 2, 2, 2))
 
 ggsave(
-  "Manuscript/Output/DS_Scatter_by_Cluster.pdf",
+  "Manuscript/Output/DS_Scatter_Marginal_by_Cluster.pdf",
   FullFacets,
   width = 8,
   height = 4,
   device = cairo_pdf
 )
+
+BetaDiagnostics <- function(FitObject, PrefixPath, NumSim = 2000) {
+  ResidObj <- simulateResiduals(FitObject, n = NumSim)
+  
+  PdfPath <- paste0(PrefixPath, "_DHARMa.pdf")
+  pdf(PdfPath, width = 7, height = 6)
+  plot(ResidObj)
+  dev.off()
+  
+  UniformTest <- testUniformity(ResidObj)
+  DispersionTest <- testDispersion(ResidObj)
+  OutlierTest <- testOutliers(ResidObj)
+  
+  data.frame(
+    UniformP = UniformTest$p.value,
+    DispersionP = DispersionTest$p.value,
+    OutliersP = OutlierTest$p.value,
+    stringsAsFactors = FALSE
+  )
+}
+
+DataModel <- dat %>%
+  mutate(
+    PlotFactor = factor(Plot),
+    Altitude = factor(Altitude),
+    Aspect = factor(Aspect)
+  )
+
+FitBeta2003 <- glmmTMB(
+  Y1 ~ Altitude + Aspect + BasePerAgr + LBaseAzoArea + BasePerCO + (1 | PlotFactor),
+  data = DataModel,
+  family = beta_family(link = "logit")
+)
+
+FitBeta2016 <- glmmTMB(
+  Y2 ~ Altitude + Aspect + PostPerAgr + LPostAzoArea + PostPerCO + (1 | PlotFactor),
+  data = DataModel,
+  family = beta_family(link = "logit")
+)
+
+Diag2003 <- BetaDiagnostics(FitBeta2003, "Manuscript/Output/Beta2003", NumSim = 2000)
+Diag2016 <- BetaDiagnostics(FitBeta2016, "Manuscript/Output/Beta2016", NumSim = 2000)
+
+DiagTable <- bind_rows(
+  cbind(Year = "2003", Diag2003),
+  cbind(Year = "2016", Diag2016)
+)
+
+print(DiagTable)
+
+write.csv(
+  DiagTable,
+  "Manuscript/Output/BetaYearwise_DHARMa_Pvalues.csv",
+  row.names = FALSE
+)
+
+FlagExtremeResiduals <- function(FitObject, NumSim = 2000, Alpha = 0.01) {
+  ResidObj <- simulateResiduals(FitObject, n = NumSim)
+  Scaled <- ResidObj$scaledResiduals
+  which(Scaled < Alpha | Scaled > 1 - Alpha)
+}
+
+ExtremeIdx2003 <- FlagExtremeResiduals(FitBeta2003, NumSim = 5000, Alpha = 0.01)
+ExtremeIdx2016 <- FlagExtremeResiduals(FitBeta2016, NumSim = 5000, Alpha = 0.01)
+
+cat("Extreme residual indices (2003):", paste(ExtremeIdx2003, collapse = ", "), "\n")
+cat("Extreme residual indices (2016):", paste(ExtremeIdx2016, collapse = ", "), "\n")
+
+OverallScatterOnly <- ggplot(ScatterDF, aes(Y1, Y2)) +
+  geom_point(
+    colour = "#0072B2",
+    alpha = 0.75,
+    size = 1.6
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  labs(x = "Dead Stem Cover (2003)", y = "Dead Stem Cover (2016)") +
+  theme_bw(base_size = 9) +
+  theme(panel.grid = element_blank(), legend.position = "none")
+
+ggsave(
+  "Manuscript/Output/DS_Scatter_Overall.pdf",
+  OverallScatterOnly,
+  width = 5.12,
+  height = 4.48,
+  device = cairo_pdf
+)
+
+ScatterByPlotOnly <- ggplot(ScatterDF, aes(Y1, Y2)) +
+  geom_point(
+    colour = "#0072B2",
+    alpha = 0.8,
+    size = 1.2
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2), limits = c(0, 1)) +
+  labs(x = "Dead Stem Cover (2003)", y = "Dead Stem Cover (2016)") +
+  facet_wrap(~ PlotLab, ncol = 4) +
+  theme_bw(base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10)
+  )
+
+ggsave(
+  "Manuscript/Output/DS_Scatter_by_Cluster.pdf",
+  ScatterByPlotOnly,
+  width = 8,
+  height = 4,
+  device = cairo_pdf
+)
+
+FormatPValue <- function(PValue) {
+  if (is.na(PValue)) {
+    return("")
+  }
+  if (PValue < 0.001) {
+    return("<0.001")
+  }
+  sprintf("%.3f", PValue)
+}
+
+DiagTable <- read.csv(
+  "Manuscript/Output/BetaYearwise_DHARMa_Pvalues.csv",
+  stringsAsFactors = FALSE
+)
+
+TableData <- data.frame(
+  Year = DiagTable$Year,
+  Uniformity = vapply(DiagTable$UniformP, FormatPValue, character(1)),
+  Dispersion = vapply(DiagTable$DispersionP, FormatPValue, character(1)),
+  TailExtremes = vapply(DiagTable$OutliersP, FormatPValue, character(1)),
+  stringsAsFactors = FALSE
+)
+
+CaptionText <- paste(
+  "Simulation-based residual diagnostic p-values (DHARMa) for separate-year beta mixed models",
+  "fitted to 2003 and 2016 outcomes. Small p-values indicate departures from the fitted beta model",
+  "(uniformity, dispersion, or tail behavior)."
+)
+
+TexLines <- c(
+  "% Auto-generated table: DHARMa diagnostics for separate-year beta mixed models",
+  "\\begin{table}[!ht]",
+  "\\centering",
+  paste0("\\caption{", CaptionText, "}"),
+  "\\label{tab:beta_yearwise_dharma}",
+  "\\setlength{\\tabcolsep}{0.25cm}",
+  "\\begin{tabular}{lccc}",
+  "\\toprule",
+  "\\textbf{Year} & \\textbf{Uniformity} & \\textbf{Dispersion} & \\textbf{Tail extremes} \\\\",
+  "\\midrule",
+  paste0(TableData$Year[1], " & ", TableData$Uniformity[1], " & ", TableData$Dispersion[1], " & ", TableData$TailExtremes[1], " \\\\"),
+  paste0(TableData$Year[2], " & ", TableData$Uniformity[2], " & ", TableData$Dispersion[2], " & ", TableData$TailExtremes[2], " \\\\"),
+  "\\bottomrule",
+  "\\end{tabular}",
+  "\\end{table}"
+)
+
+writeLines(TexLines, "Manuscript/Output/BetaYearwise_DHARMa_Table.tex")
 
 #############################################################
 ############# Rectangular-beta + Gaussian copula ############
@@ -630,8 +794,8 @@ RecBetaGaussPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
     rho2 <- d["rho2"]
     rho_cop <- sin(0.5*pi*d["tau"])
     
-    p1 <- plogis(X1 %*% B1 + U1[ID])
-    p2 <- plogis(X2 %*% B2 + U2[ID])
+    p1 <- plogis(X1%*%B1 + U1[ID])
+    p2 <- plogis(X2%*%B2 + U2[ID])
     
     R <- matrix(c(1, rho_cop, rho_cop, 1), 2)
     Z <- rmvt(n, sigma = R, df = Inf)
@@ -784,8 +948,8 @@ RecBetaGaussGOF <- function(fit, Data, X1, X2, B = 500) {
     U1re <- d[grep("^U1\\[", names(d))]
     U2re <- d[grep("^U2\\[", names(d))]
     
-    p1 <- plogis(X1 %*% Beta1 + U1re[Data$ID])
-    p2 <- plogis(X2 %*% Beta2 + U2re[Data$ID])
+    p1 <- plogis(X1%*%Beta1 + U1re[Data$ID])
+    p2 <- plogis(X2%*%Beta2 + U2re[Data$ID])
     
     U1_draws[, s] <- pRectBeta(Data$Y1, p1, d["phi1"], d["rho1"])
     U2_draws[, s] <- pRectBeta(Data$Y2, p2, d["phi2"], d["rho2"])
@@ -1265,8 +1429,8 @@ RecBetaGumbelPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
     theta <- 1/(1 - d["tau"])
     cop <- gumbelCopula(theta, dim = 2)
     
-    p1 <- plogis(X1 %*% B1 + U1[ID])
-    p2 <- plogis(X2 %*% B2 + U2[ID])
+    p1 <- plogis(X1%*%B1 + U1[ID])
+    p2 <- plogis(X2%*%B2 + U2[ID])
     
     U <- rCopula(n, cop)
     
@@ -1405,8 +1569,8 @@ RecBetaGumbelGOF <- function(fit, Data, X1, X2, B = 500) {
     U1re <- d[grep("^U1\\[", names(d))]
     U2re <- d[grep("^U2\\[", names(d))]
     
-    p1 <- plogis(X1 %*% Beta1 + U1re[Data$ID])
-    p2 <- plogis(X2 %*% Beta2 + U2re[Data$ID])
+    p1 <- plogis(X1%*%Beta1 + U1re[Data$ID])
+    p2 <- plogis(X2%*%Beta2 + U2re[Data$ID])
     
     U1_draws[, s] <- pRectBeta(Data$Y1, p1, d["phi1"], d["rho1"])
     U2_draws[, s] <- pRectBeta(Data$Y2, p2, d["phi2"], d["rho2"])
@@ -1853,8 +2017,8 @@ RecBetaClayPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
     theta <- 2*d["tau"]/(1 - d["tau"])
     cop <- claytonCopula(theta, dim = 2)
     
-    p1 <- plogis(X1 %*% B1 + U1[ID])
-    p2 <- plogis(X2 %*% B2 + U2[ID])
+    p1 <- plogis(X1%*%B1 + U1[ID])
+    p2 <- plogis(X2%*%B2 + U2[ID])
     
     U <- rCopula(n, cop)
     
@@ -1994,8 +2158,8 @@ RecBetaClaytonGOF <- function(fit, Data, X1, X2, B = 500) {
     U1re <- d[grep("^U1\\[", names(d))]
     U2re <- d[grep("^U2\\[", names(d))]
     
-    p1 <- plogis(X1 %*% Beta1 + U1re[Data$ID])
-    p2 <- plogis(X2 %*% Beta2 + U2re[Data$ID])
+    p1 <- plogis(X1%*%Beta1 + U1re[Data$ID])
+    p2 <- plogis(X2%*%Beta2 + U2re[Data$ID])
     
     U1_draws[, s] <- pRectBeta(Data$Y1, p1, d["phi1"], d["rho1"])
     U2_draws[, s] <- pRectBeta(Data$Y2, p2, d["phi2"], d["rho2"])
@@ -2198,6 +2362,164 @@ cat(
   "\n"
 )
 
+#############################################################
+### Sensitivity (pseudo-observations/IFM): Copula on PITs ###
+#############################################################
+# Step 1: Fit independent rectangular-beta mixed margins (done above).
+# Step 2: Construct conditional pseudo-observations U1, U2 via fitted marginal CDFs,
+#         then fit Gaussian, Gumbel, and Clayton copulas to (U1, U2) by ML.
+
+GetPosteriorMedianVector <- function(DrawsMatrix, Prefix) {
+  ColIndex <- grep(paste0("^", Prefix, "\\["), colnames(DrawsMatrix))
+  apply(DrawsMatrix[, ColIndex, drop = FALSE], 2, median)
+}
+
+GetPosteriorMedianScalar <- function(DrawsMatrix, Name) {
+  median(as.numeric(DrawsMatrix[, Name]))
+}
+
+RectBetaCdf <- function(Y, Mu, Phi, Rho) {
+  Star1 <- 1 - abs(2*Mu - 1)
+  Denom <- 1 - Phi*Star1
+  Star2 <- (Mu - 0.5*Phi*Star1)/Denom
+  
+  Alpha <- Rho*Star2
+  Beta <- Rho*(1 - Star2)
+  
+  PhiStar <- Phi*Star1
+  PhiStar*Y + (1 - PhiStar)*pbeta(Y, Alpha, Beta)
+}
+
+BuildPseudoObsRectBetaIndep <- function(RecBetaIndepDraws, Data, X1, X2) {
+  Beta1Hat <- GetPosteriorMedianVector(RecBetaIndepDraws, "Beta1")
+  Beta2Hat <- GetPosteriorMedianVector(RecBetaIndepDraws, "Beta2")
+  
+  U1Hat <- GetPosteriorMedianVector(RecBetaIndepDraws, "U1")
+  U2Hat <- GetPosteriorMedianVector(RecBetaIndepDraws, "U2")
+  
+  Phi1Hat <- GetPosteriorMedianScalar(RecBetaIndepDraws, "phi1")
+  Phi2Hat <- GetPosteriorMedianScalar(RecBetaIndepDraws, "phi2")
+  Rho1Hat <- GetPosteriorMedianScalar(RecBetaIndepDraws, "rho1")
+  Rho2Hat <- GetPosteriorMedianScalar(RecBetaIndepDraws, "rho2")
+  
+  Id <- Data$ID
+  
+  Lp1 <- as.numeric(X1%*%Beta1Hat) + U1Hat[Id]
+  Lp2 <- as.numeric(X2%*%Beta2Hat) + U2Hat[Id]
+  Mu1 <- plogis(Lp1)
+  Mu2 <- plogis(Lp2)
+  
+  U1 <- RectBetaCdf(Data$Y1, Mu1, Phi1Hat, Rho1Hat)
+  U2 <- RectBetaCdf(Data$Y2, Mu2, Phi2Hat, Rho2Hat)
+  
+  data.frame(
+    U1 = U1,
+    U2 = U2,
+    stringsAsFactors = FALSE
+  )
+}
+
+FitCopulasMl <- function(PseudoObsDf) {
+  CopulaData <- as.matrix(PseudoObsDf[, c("U1", "U2")])
+  
+  FitOne <- function(CopulaObj, Start) {
+    Fit <- fitCopula(CopulaObj, CopulaData, method = "ml", start = Start)
+    LogLik <- as.numeric(logLik(Fit))
+    Param <- as.numeric(coef(Fit))
+    
+    Tau <- if (inherits(CopulaObj, "normalCopula")) {
+      2/pi*asin(Param)
+    } else if (inherits(CopulaObj, "gumbelCopula")) {
+      1 - 1/Param
+    } else if (inherits(CopulaObj, "claytonCopula")) {
+      Param/(Param + 2)
+    } else {
+      NA_real_
+    }
+    
+    data.frame(
+      Family = class(CopulaObj)[1],
+      Param = Param,
+      Tau = Tau,
+      LogLik = LogLik,
+      Aic = -2*LogLik + 2,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  Results <- rbind(
+    FitOne(normalCopula(param = 0.2, dim = 2), Start = 0.2),
+    FitOne(gumbelCopula(param = 2, dim = 2), Start = 2),
+    FitOne(claytonCopula(param = 1, dim = 2), Start = 1)
+  )
+  
+  Results[order(Results$Aic), ]
+}
+
+PseudoObsDf <- BuildPseudoObsRectBetaIndep(
+  RecBetaIndepDraws = RecBetaIndepDraws,
+  Data = Data,
+  X1 = X1,
+  X2 = X2
+)
+
+CopulaFitTable <- FitCopulasMl(PseudoObsDf)
+print(CopulaFitTable)
+
+CopulaOut <- CopulaFitTable %>%
+  mutate(
+    Copula = case_when(
+      Family == "normalCopula" ~ "Gaussian",
+      Family == "gumbelCopula" ~ "Gumbel",
+      Family == "claytonCopula" ~ "Clayton",
+      TRUE ~ Family
+    )
+  ) %>%
+  select(Copula, Param, Tau, LogLik, Aic) %>%
+  mutate(
+    Copula = factor(Copula, levels = c("Gaussian", "Gumbel", "Clayton"))
+  ) %>%
+  arrange(Copula) %>%
+  mutate(
+    Param = round(Param, 3),
+    Tau = round(Tau, 3),
+    LogLik = round(LogLik, 3),
+    Aic = round(Aic, 3)
+  )
+
+CopulaOut <- as.data.frame(CopulaOut)
+
+print(CopulaOut, row.names = FALSE)
+
+colnames(CopulaOut) <- c(
+  "Copula",
+  "$\\hat{\\theta}$",
+  "$\\hat{\\tau}$",
+  "logLik",
+  "AIC"
+)
+
+Xt <- xtable(
+  CopulaOut,
+  caption = paste(
+    "Pseudo-observation (IFM) sensitivity analysis:",
+    "copula fits to conditional PIT pairs from the independent rectangular-beta mixed margins."
+  ),
+  label = "tab:pseudoobs_copula_fit"
+)
+
+OutputPath <- "Manuscript/Output/DeadStemCover_PseudoObs_CopulaFit_Table.tex"
+
+print(
+  Xt,
+  file = OutputPath,
+  include.rownames = FALSE,
+  caption.placement = "top",
+  sanitize.colnames.function = identity
+)
+
+cat("Wrote LaTeX table to:", OutputPath, "\n")
+
 ###############################
 ### Log marginal likelihood ###
 ###############################
@@ -2376,8 +2698,8 @@ RecBetaIndepPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
     phi2 <- d["phi2"]
     rho2 <- d["rho2"]
     
-    p1 <- plogis(X1 %*% B1 + U1[ID])
-    p2 <- plogis(X2 %*% B2 + U2[ID])
+    p1 <- plogis(X1%*%B1 + U1[ID])
+    p2 <- plogis(X2%*%B2 + U2[ID])
     
     Umat <- matrix(runif(2*n), ncol = 2)
     
@@ -2522,8 +2844,8 @@ BetaIndepModel <- "
       U2[j] ~ dnorm(0, tau2)
     }
 
-    phi1 ~ dgamma(0.0001, 0.0001)
-    phi2 ~ dgamma(0.0001, 0.0001)
+    rho1 ~ dgamma(0.0001, 0.0001)
+    rho2 ~ dgamma(0.0001, 0.0001)
 
     for (i in 1:NObs) {
       LP1[i] <- inprod(X1[i, ], Beta1[]) + U1[ID[i]]
@@ -2531,10 +2853,10 @@ BetaIndepModel <- "
       mu1[i] <- ilogit(LP1[i])
       mu2[i] <- ilogit(LP2[i])
 
-      alpha1[i] <- mu1[i]*phi1
-      beta1[i] <- (1 - mu1[i])*phi1
-      alpha2[i] <- mu2[i]*phi2
-      beta2[i] <- (1 - mu2[i])*phi2
+      alpha1[i] <- mu1[i]*rho1
+      beta1[i] <- (1 - mu1[i])*rho1
+      alpha2[i] <- mu2[i]*rho2
+      beta2[i] <- (1 - mu2[i])*rho2
 
       pdf1[i] <- dbeta(Y1[i], alpha1[i], beta1[i])
       pdf2[i] <- dbeta(Y2[i], alpha2[i], beta2[i])
@@ -2554,8 +2876,8 @@ BetaIndepFit <- function(Data, X1, X2) {
       "sigma2",
       "U1",
       "U2",
-      "phi1",
-      "phi2"
+      "rho1",
+      "rho2"
     )
   
   run.jags(
@@ -2620,8 +2942,8 @@ BetaIndepLogLik <- function(theta, dList) {
   
   sigma1 <- theta["sigma1"]
   sigma2 <- theta["sigma2"]
-  phi1 <- theta["phi1"]
-  phi2 <- theta["phi2"]
+  rho1 <- theta["rho1"]
+  rho2 <- theta["rho2"]
   
   ll <- 0
   for (i in seq_len(dList$NObs)) {
@@ -2630,10 +2952,10 @@ BetaIndepLogLik <- function(theta, dList) {
     mu1 <- plogis(lp1)
     mu2 <- plogis(lp2)
     
-    a1 <- mu1*phi1
-    b1 <- (1 - mu1)*phi1
-    a2 <- mu2*phi2
-    b2 <- (1 - mu2)*phi2
+    a1 <- mu1*rho1
+    b1 <- (1 - mu1)*rho1
+    a2 <- mu2*rho2
+    b2 <- (1 - mu2)*rho2
     
     ll <- ll +
       dbeta(dList$Y1[i], a1, b1, log = TRUE) +
@@ -2652,8 +2974,8 @@ BetaIndepLogPrior <- function(theta, dList) {
   
   sigma1 <- theta["sigma1"]
   sigma2 <- theta["sigma2"]
-  phi1 <- theta["phi1"]
-  phi2 <- theta["phi2"]
+  rho1 <- theta["rho1"]
+  rho2 <- theta["rho2"]
   
   lp <- 0
   lp <- lp + sum(dnorm(Beta1, 0, 100, log = TRUE))
@@ -2667,8 +2989,8 @@ BetaIndepLogPrior <- function(theta, dList) {
     }
   lp <- lp + half_t(sigma1) + half_t(sigma2)
   
-  lp <- lp + dgamma(phi1, 0.0001, 0.0001, log = TRUE)
-  lp <- lp + dgamma(phi2, 0.0001, 0.0001, log = TRUE)
+  lp <- lp + dgamma(rho1, 0.0001, 0.0001, log = TRUE)
+  lp <- lp + dgamma(rho2, 0.0001, 0.0001, log = TRUE)
   
   lp
 }
@@ -2700,8 +3022,8 @@ setBnd <- function(name, lo, hi) {
 
 setBnd("sigma1", 0, Inf)
 setBnd("sigma2", 0, Inf)
-setBnd("phi1", 0, Inf)
-setBnd("phi2", 0, Inf)
+setBnd("rho1", 0, Inf)
+setBnd("rho2", 0, Inf)
 
 names(BetaIndepLB) <- names(BetaIndepUB) <- BetaIndepCN
 
@@ -2751,8 +3073,8 @@ print(summary(BetaIndepBridge))
 ### Residual diagnostics ###
 ############################
 
-qConvBeta <- function(u, mu, phi) {
-  qbeta(u, mu*phi, (1 - mu)*phi)
+qConvBeta <- function(u, mu, rho) {
+  qbeta(u, mu*rho, (1 - mu)*rho)
 }
 
 BetaIndepPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
@@ -2772,11 +3094,11 @@ BetaIndepPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
     U1 <- d[grep("^U1\\[", names(d))]
     U2 <- d[grep("^U2\\[", names(d))]
     
-    phi1 <- d["phi1"]
-    phi2 <- d["phi2"]
+    rho1 <- d["rho1"]
+    rho2 <- d["rho2"]
     
-    mu1 <- plogis(X1 %*% B1 + U1[ID])
-    mu2 <- plogis(X2 %*% B2 + U2[ID])
+    mu1 <- plogis(X1%*%B1 + U1[ID])
+    mu2 <- plogis(X2%*%B2 + U2[ID])
     
     if ("tau" %in% names(d)) {
       theta <- sin(0.5*pi*d["tau"])
@@ -2786,8 +3108,8 @@ BetaIndepPostPred <- function(fit, Data, X1, X2, ID, S = 1000) {
       Umat <- matrix(runif(2*n), ncol = 2)
     }
     
-    sim1[, s] <- qConvBeta(Umat[, 1], mu1, phi1)
-    sim2[, s] <- qConvBeta(Umat[, 2], mu2, phi2)
+    sim1[, s] <- qConvBeta(Umat[, 1], mu1, rho1)
+    sim2[, s] <- qConvBeta(Umat[, 2], mu2, rho2)
     
     if (s == 1) {
       fit1 <- mu1
@@ -2902,6 +3224,145 @@ RecBetaBetaIndepPredObj <- BetaIndepPostPred(
 )
 
 RecBetaBetaIndepDHARMa <- PlainBetaDiagnostics(RecBetaBetaIndepPredObj, Data)
+
+#############################################################
+########### Prior-sensitivity: Gauss copula model ###########
+#############################################################
+
+RecBetaGaussModelPriorSens <- "
+  model {
+
+    for (k in 1:NFix1) {
+      Beta1[k] ~ dnorm(0, 0.0001)
+    }
+    for (k in 1:NFix2) {
+      Beta2[k] ~ dnorm(0, 0.0001)
+    }
+
+    SigmaPrec <- 1/pow(2.5, 2)
+
+    sigma1 ~ dnorm(0, SigmaPrec)T(0, )
+    sigma2 ~ dnorm(0, SigmaPrec)T(0, )
+
+    tau1 <- pow(sigma1, -2)
+    tau2 <- pow(sigma2, -2)
+
+    for (j in 1:NRand) {
+      U1[j] ~ dnorm(0, tau1)
+      U2[j] ~ dnorm(0, tau2)
+    }
+
+    phi1 ~ dunif(0, 1)
+    phi2 ~ dunif(0, 1)
+
+    LogRhoMean <- log(10)
+    LogRhoPrec <- 1
+
+    rho1 ~ dlnorm(LogRhoMean, LogRhoPrec)
+    rho2 ~ dlnorm(LogRhoMean, LogRhoPrec)
+
+    tau ~ dunif(-1, 1)
+    rho_cop <- sin(0.5*pi*tau)
+
+    for (i in 1:NObs) {
+
+      LP1[i] <- inprod(X1[i, ], Beta1[]) + U1[ID[i]]
+      LP2[i] <- inprod(X2[i, ], Beta2[]) + U2[ID[i]]
+      p1[i] <- ilogit(LP1[i])
+      p2[i] <- ilogit(LP2[i])
+
+      S1_1[i] <- 1 - abs(2*p1[i] - 1)
+      S2_1[i] <- (p1[i] - 0.5*phi1*S1_1[i])/(1 - phi1*S1_1[i])
+      a1[i] <- rho1*S2_1[i]
+      b1[i] <- rho1*(1 - S2_1[i])
+
+      pdf1[i] <- phi1*S1_1[i] + (1 - phi1*S1_1[i])*dbeta(Y1[i], a1[i], b1[i])
+      cdf1[i] <- phi1*S1_1[i]*Y1[i] + (1 - phi1*S1_1[i])*pbeta(Y1[i], a1[i], b1[i])
+
+      S1_2[i] <- 1 - abs(2*p2[i] - 1)
+      S2_2[i] <- (p2[i] - 0.5*phi2*S1_2[i])/(1 - phi2*S1_2[i])
+      a2[i] <- rho2*S2_2[i]
+      b2[i] <- rho2*(1 - S2_2[i])
+
+      pdf2[i] <- phi2*S1_2[i] + (1 - phi2*S1_2[i])*dbeta(Y2[i], a2[i], b2[i])
+      cdf2[i] <- phi2*S1_2[i]*Y2[i] + (1 - phi2*S1_2[i])*pbeta(Y2[i], a2[i], b2[i])
+
+      z1[i] <- qnorm(cdf1[i], 0, 1)
+      z2[i] <- qnorm(cdf2[i], 0, 1)
+
+      logCop[i] <- -0.5*log(1 - pow(rho_cop, 2)) -
+                   (pow(z1[i], 2) - 2*rho_cop*z1[i]*z2[i] + pow(z2[i], 2))/
+                   (2*(1 - pow(rho_cop, 2))) +
+                   0.5*(pow(z1[i], 2) + pow(z2[i], 2))
+
+      LL[i] <- log(pdf1[i]) + log(pdf2[i]) + logCop[i]
+      zeros[i] ~ dpois(BigC - LL[i])
+    }
+  }
+"
+
+RecBetaGaussPriorSensFit <- function(Data, X1, X2) {
+  params <- c(
+    "Beta1",
+    "Beta2",
+    "sigma1",
+    "sigma2",
+    "U1",
+    "U2",
+    "phi1",
+    "rho1",
+    "phi2",
+    "rho2",
+    "tau"
+  )
+  
+  run.jags(
+    model = RecBetaGaussModelPriorSens,
+    data = JAGSData,
+    inits = InitsList,
+    monitor = params,
+    n.chains = NumChains,
+    adapt = 1000,
+    burnin = 15000,
+    sample = 1000,
+    thin = 25,
+    method = "parallel",
+    modules = "glm",
+    factories = "bugs::MNormal sampler off",
+    silent.jags = FALSE
+  )
+}
+
+RecBetaGaussPriorSensRun <- FALSE
+RecBetaGaussPriorSensFitFile <- "Manuscript/Output/Rect_Beta_Gauss_Fit_PriorSens.rds"
+
+if (!file.exists(RecBetaGaussPriorSensFitFile)) {
+  cat("No RDS found. Running Gaussian-copula sensitivity-prior model...\n")
+  RecBetaGaussPriorSensFitObj <- RecBetaGaussPriorSensFit(Data, X1, X2)
+  saveRDS(RecBetaGaussPriorSensFitObj, RecBetaGaussPriorSensFitFile)
+} else {
+  if (RecBetaGaussPriorSensRun) {
+    cat("RDS exists but RecBetaGaussPriorSensRun = TRUE. Re-running...\n")
+    RecBetaGaussPriorSensFitObj <- RecBetaGaussPriorSensFit(Data, X1, X2)
+    saveRDS(RecBetaGaussPriorSensFitObj, RecBetaGaussPriorSensFitFile)
+  } else {
+    cat("Loading saved Gaussian-copula sensitivity-prior fit...\n")
+    RecBetaGaussPriorSensFitObj <- readRDS(RecBetaGaussPriorSensFitFile)
+  }
+}
+
+print(summary(RecBetaGaussPriorSensFitObj))
+
+RecBetaGaussPriorSensMCMC <- as.mcmc.list(RecBetaGaussPriorSensFitObj)
+RecBetaGaussPriorSensDraws <- do.call(rbind, RecBetaGaussPriorSensMCMC)
+
+cat(
+  "Samples:",
+  nrow(RecBetaGaussPriorSensDraws),
+  " Params:",
+  ncol(RecBetaGaussPriorSensDraws),
+  "\n"
+)
 
 ##################################################
 ### Summarize beta estimates and HPD intervals ###
@@ -3212,3 +3673,158 @@ RecBetaGumbelFitObj$timetaken
 RecBetaClayFitObj$timetaken
 RecBetaIndepFitObj$timetaken
 BetaIndepFitObj$timetaken
+
+##################################
+### Posterior of Kendall's tau ###
+##################################
+
+ExtractTau <- function(Draws, ModelLabel) {
+  data.frame(
+    Model = ModelLabel,
+    Tau = as.numeric(Draws[, "tau"]),
+    stringsAsFactors = FALSE
+  )
+}
+
+TauData <- rbind(
+  ExtractTau(RecBetaGaussDraws, "RectBeta[Gauss]"),
+  ExtractTau(RecBetaGumbelDraws, "RectBeta[Gumbel]"),
+  ExtractTau(RecBetaClayDraws, "RectBeta[Clayton]")
+)
+
+TauLevels <- c("RectBeta[Gauss]", "RectBeta[Gumbel]", "RectBeta[Clayton]")
+TauData$Model <- factor(TauData$Model, levels = TauLevels)
+
+if (!dir.exists("Manuscript/Output")) {
+  dir.create("Manuscript/Output", recursive = TRUE)
+}
+
+TauColor <- c(
+  "RectBeta[Gauss]" = "#08519C",
+  "RectBeta[Gumbel]" = "#3182BD",
+  "RectBeta[Clayton]" = "#2BAED6"
+)
+
+TauBreaks <- seq(-0.5, 0.5, by = 0.1)
+
+TauFacetPlot <- ggplot(TauData, aes(Tau)) +
+  geom_histogram(
+    aes(y = after_stat(density), fill = Model),
+    bins = 45,
+    alpha = 0.8,
+    colour = NA
+  ) +
+  facet_wrap(~ Model, nrow = 1) +
+  scale_fill_manual(values = TauColor) +
+  scale_x_continuous(
+    breaks = TauBreaks,
+    labels = function(x) sprintf("%.1f", x)
+  ) +
+  coord_cartesian(xlim = c(0, 0.5)) +
+  labs(x = expression("Kendall's "*tau), y = "Posterior density") +
+  theme_classic(base_size = 24) +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 14)
+  )
+
+TauOverlayPlot <- ggplot(TauData, aes(Tau, fill = Model)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 45,
+    alpha = 0.8,
+    colour = NA,
+    position = "identity"
+  ) +
+  scale_fill_manual(values = TauColor) +
+  scale_x_continuous(
+    breaks = TauBreaks,
+    labels = function(x) sprintf("%.1f", x)
+  ) +
+  coord_cartesian(xlim = c(0, 0.5)) +
+  labs(x = expression("Kendall's "*tau), y = "Posterior density") +
+  theme_classic(base_size = 24) +
+  theme(legend.title = element_blank())
+
+ggsave(
+  "Manuscript/Output/DeadStemCover_tau_posterior_facets.pdf",
+  TauFacetPlot,
+  width = 12,
+  height = 4.6,
+  device = cairo_pdf
+)
+
+ggsave(
+  "Manuscript/Output/DeadStemCover_tau_posterior_overlay.pdf",
+  TauOverlayPlot,
+  width = 6.4,
+  height = 4.6,
+  device = cairo_pdf
+)
+
+SaveTauSinglePlot <- function(TauData, ModelLabel, FilePath) {
+  LocalData <- TauData[TauData$Model == ModelLabel, , drop = FALSE]
+  
+  P <- ggplot(LocalData, aes(Tau)) +
+    geom_histogram(
+      aes(y = after_stat(density)),
+      bins = 45,
+      fill = TauColor[ModelLabel],
+      alpha = 0.8,
+      colour = NA
+    ) +
+    scale_x_continuous(
+      breaks = TauBreaks,
+      labels = function(x) sprintf("%.1f", x)
+    ) +
+    coord_cartesian(xlim = c(0, 0.5)) +
+    labs(x = expression("Kendall's "*tau), y = "Posterior density") +
+    theme_classic(base_size = 24)
+  
+  ggsave(FilePath, P, width = 6.4, height = 4.6, device = cairo_pdf)
+}
+
+SaveTauSinglePlot(TauData, "RectBeta[Gauss]", "Manuscript/Output/DeadStemCover_Gauss_tau_posterior.pdf")
+SaveTauSinglePlot(TauData, "RectBeta[Gumbel]", "Manuscript/Output/DeadStemCover_Gumbel_tau_posterior.pdf")
+SaveTauSinglePlot(TauData, "RectBeta[Clayton]", "Manuscript/Output/DeadStemCover_Clayton_tau_posterior.pdf")
+
+##############################################
+### Gaussian-only posterior contrast table ###
+##############################################
+
+GaussSums <- list(
+  `RectBeta[Gauss]` = summary(RecBetaGaussFitObj),
+  `RectBeta[Gauss][PriorSens]` = summary(RecBetaGaussPriorSensFitObj)
+)
+
+GaussCombo <- Reduce(
+  function(x, y) full_join(x, y, by = "param"),
+  Map(extract_model, GaussSums, names(GaussSums))
+) %>%
+  arrange(param)
+
+BaseCols <- grep("^RectBeta\\[Gauss\\]_", names(GaussCombo), value = TRUE)
+SensCols <- grep("^RectBeta\\[Gauss\\]\\[PriorSens\\]_", names(GaussCombo), value = TRUE)
+
+GaussComboSpaced <- GaussCombo %>%
+  mutate(Spacer = "\\hspace{1em}") %>%
+  select(param, all_of(BaseCols), Spacer, all_of(SensCols))
+
+colnames(GaussComboSpaced)[colnames(GaussComboSpaced) == "Spacer"] <- ""
+
+GaussColAlignSpaced <- c(
+  "l", "l",
+  rep("c", length(BaseCols)),
+  "c",
+  rep("c", length(SensCols))
+)
+
+GaussXtSpaced <- xtable(GaussComboSpaced, align = GaussColAlignSpaced)
+
+print(
+  GaussXtSpaced,
+  include.rownames = FALSE,
+  sanitize.text.function = identity,
+  file = "Manuscript/Output/DeadStemCover_posterior_summaries_gauss_sensitivity.tex"
+)
